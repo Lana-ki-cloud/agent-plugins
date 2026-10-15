@@ -589,3 +589,56 @@ def test_local_io_errors_are_audited_not_crashed(write_env, monkeypatch):
     assert "local I/O error" in err  # nosec B101 - test assertion
     assert posted_registrations(transport) == []  # nosec B101 - test assertion
     assert audit_entries(write_env)[-1]["status"] == "failure"  # nosec B101 - test assertion
+
+
+def test_remote_readback_never_overwrites_existing_local_record(write_env):
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.update(DOMAIN, state=cfr.STATE_FAILED, failure_reason="registry rejected")
+    routes = registration_routes()
+    routes[("GET", f"/registrations/{DOMAIN}")] = (200, envelope({"domain_name": DOMAIN}))
+    transport = FakeTransport(routes)
+    code, _, _ = run(
+        ["register", DOMAIN, "--confirm", PHRASE_1Y, "--retry-after-failure"],
+        write_env, transport, human_types(DOMAIN),
+    )
+    assert code == 2  # nosec B101 - test assertion
+    assert posted_registrations(transport) == []  # nosec B101 - test assertion
+    record = store.get(DOMAIN)
+    assert record["state"] == cfr.STATE_FAILED  # nosec B101 - test assertion
+    assert record["failure_reason"] == "registry rejected"  # nosec B101 - test assertion
+
+
+def test_state_updates_respect_the_domain_lock(write_env, monkeypatch):
+    monkeypatch.setattr(cfr, "LOCK_WAIT_SECONDS", 0.0)
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED})
+    (store.directory / f"{DOMAIN}.lock").write_text("")
+    with pytest.raises(cfr.IdempotencyError):
+        store.update(DOMAIN, state=cfr.STATE_SUCCEEDED)
+    assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
+
+
+def test_registration_status_does_not_write_while_lock_is_held(write_env, monkeypatch):
+    monkeypatch.setattr(cfr, "LOCK_WAIT_SECONDS", 0.0)
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED})
+    (store.directory / f"{DOMAIN}.lock").write_text("")
+    done = {**WORKFLOW_PENDING, "completed": True, "state": "succeeded"}
+    transport = FakeTransport({("GET", f"/registrations/{DOMAIN}/registration-status"): (200, envelope(done))})
+    code, _, err = run(["registration-status", DOMAIN], write_env, transport)
+    assert code == 2  # nosec B101 - test assertion
+    assert "lock" in err  # nosec B101 - test assertion
+    assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
+
+
+def test_retry_fails_cleanly_if_failed_record_vanishes(write_env, monkeypatch):
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.update(DOMAIN, state=cfr.STATE_FAILED, failure_reason="registry rejected")
+
+    def vanished(src, dst):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(cfr.os, "rename", vanished)
+    with pytest.raises(cfr.IdempotencyError):
+        store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED}, replace_failed=True)
+    assert not (store.directory / f"{DOMAIN}.lock").exists()  # nosec B101 - test assertion

@@ -35,6 +35,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -92,6 +93,9 @@ STATE_SUBMITTED = "submitted"
 STATE_UNKNOWN = "unknown"
 STATE_FAILED = "failed"
 STATE_SUCCEEDED = "succeeded"
+
+# How long a state update waits for a concurrent holder of the per-domain lock.
+LOCK_WAIT_SECONDS = 5.0
 
 IRREVERSIBLE_WARNING = (
     "WARNING: Domain registration is an irreversible purchase. Cloudflare "
@@ -468,6 +472,23 @@ class StateStore:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(record, handle, sort_keys=True)
 
+    def _acquire_lock(self, name: str, wait_seconds: float = 0.0) -> Path:
+        """Take the per-domain O_EXCL lock that guards every state-file write."""
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock = self.directory / f"{name}.lock"
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+                return lock
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise IdempotencyError(
+                        f"{name}: another operation holds the lock ({lock.name}); if no process is running, "
+                        "verify registration-status before removing the stale lock manually"
+                    ) from None
+                time.sleep(0.05)  # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- bounded lock back-off
+
     def claim(self, domain: str, record: Mapping[str, Any], replace_failed: bool = False) -> None:
         """Atomically create the record; fail if one already exists.
 
@@ -475,17 +496,9 @@ class StateStore:
         submissions (including concurrent ``--retry-after-failure``) cannot both
         proceed. A failed record is archived (never deleted) before replacement.
         """
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         name = normalize_domain(domain)
         path = self._path(name)
-        lock = self.directory / f"{name}.lock"
-        try:
-            os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-        except FileExistsError:
-            raise IdempotencyError(
-                f"{name}: another submission holds the lock ({lock.name}); if no process is running, "
-                "verify registration-status before removing the stale lock manually"
-            ) from None
+        lock = self._acquire_lock(name)
         try:
             record = dict(record)
             if replace_failed:
@@ -497,7 +510,12 @@ class StateStore:
                     archive_dir.mkdir(mode=0o700, exist_ok=True)
                     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
                     archived = archive_dir / f"{name}.{stamp}.json"
-                    os.rename(path, archived)
+                    try:
+                        os.rename(path, archived)
+                    except FileNotFoundError:
+                        raise IdempotencyError(
+                            f"{name}: the failed record disappeared before it could be archived; review and retry"
+                        ) from None
                     record["previous_failure"] = {
                         "archived_record": f"archive/{archived.name}",
                         "failure_reason": existing.get("failure_reason"),
@@ -509,17 +527,30 @@ class StateStore:
         finally:
             lock.unlink()
 
-    def update(self, domain: str, **fields: Any) -> dict:
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        record = self.get(domain) or {"domain": normalize_domain(domain)}
-        record.pop("corrupt", None)
-        record.update(fields)
-        record["updated_at"] = utc_timestamp()
-        path = self._path(domain)
-        tmp = path.with_suffix(".json.tmp")
-        self._write(tmp, record, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-        os.replace(tmp, path)
-        return record
+    def update(self, domain: str, only_if_absent: bool = False, **fields: Any) -> Optional[dict]:
+        """Read-modify-write under the per-domain lock.
+
+        With ``only_if_absent`` an existing record is left untouched (and
+        returned unchanged), so a readback never overwrites a submission or a
+        recorded failure reason.
+        """
+        name = normalize_domain(domain)
+        lock = self._acquire_lock(name, wait_seconds=LOCK_WAIT_SECONDS)
+        try:
+            existing = self.get(name)
+            if only_if_absent and existing is not None:
+                return existing
+            record = existing or {"domain": name}
+            record.pop("corrupt", None)
+            record.update(fields)
+            record["updated_at"] = utc_timestamp()
+            path = self._path(name)
+            tmp = path.with_suffix(".json.tmp")
+            self._write(tmp, record, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+            os.replace(tmp, path)
+            return record
+        finally:
+            lock.unlink()
 
 
 def check_local_idempotency(store: StateStore, domain: str, retry_after_failure: bool) -> None:
@@ -615,7 +646,7 @@ def op_register(
     name = normalize_domain(domain)
     check_local_idempotency(store, name, retry_after_failure)
     if remote_registration_exists(client, name):
-        store.update(name, state=STATE_SUCCEEDED, source="remote-readback")
+        store.update(name, only_if_absent=True, state=STATE_SUCCEEDED, source="remote-readback")
         raise IdempotencyError(f"{name}: a registration already exists in the Cloudflare account")
 
     quote = op_quote(client, name, years)
@@ -659,11 +690,15 @@ def op_register(
         # Definitive 4xx: failed (human review before any retry).
         # Network error / 5xx: outcome unknown; never retried automatically.
         state = STATE_FAILED if exc.definitive else STATE_UNKNOWN
-        store.update(name, state=state, failure_reason=exc.reason, http_status=exc.http_status)
+        try:
+            store.update(name, state=state, failure_reason=exc.reason, http_status=exc.http_status)
+        except (OSError, IdempotencyError):
+            # The local record stays "submitted", which still blocks resubmission.
+            pass
         raise
     try:
         store.update(name, **_state_from_workflow(workflow))
-    except OSError as exc:
+    except (OSError, IdempotencyError) as exc:
         # The local record stays "submitted", which keeps the domain locked.
         raise RegistrarError(
             f"registration was submitted but the local state could not be updated ({exc.__class__.__name__}); "

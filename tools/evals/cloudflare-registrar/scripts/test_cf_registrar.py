@@ -642,3 +642,42 @@ def test_retry_fails_cleanly_if_failed_record_vanishes(write_env, monkeypatch):
     with pytest.raises(cfr.IdempotencyError):
         store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED}, replace_failed=True)
     assert not (store.directory / f"{DOMAIN}.lock").exists()  # nosec B101 - test assertion
+
+
+@pytest.mark.parametrize("remote", [None, "garbage", {"state": "mystery"}, {**WORKFLOW_PENDING, "state": "pending"}])
+def test_registration_status_never_downgrades_succeeded(write_env, remote):
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.update(DOMAIN, state=cfr.STATE_SUCCEEDED)
+    transport = FakeTransport({("GET", f"/registrations/{DOMAIN}/registration-status"): (200, envelope(remote))})
+    run(["registration-status", DOMAIN], write_env, transport)
+    assert store.get(DOMAIN)["state"] == cfr.STATE_SUCCEEDED  # nosec B101 - test assertion
+
+
+def test_registration_status_keeps_recorded_failure_reason(write_env):
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.update(DOMAIN, state=cfr.STATE_FAILED, failure_reason="registry rejected")
+    remote = {**WORKFLOW_PENDING, "state": "failed", "error": {"code": "x", "message": "other"}}
+    transport = FakeTransport({("GET", f"/registrations/{DOMAIN}/registration-status"): (200, envelope(remote))})
+    run(["registration-status", DOMAIN], write_env, transport)
+    record = store.get(DOMAIN)
+    assert record["state"] == cfr.STATE_FAILED  # nosec B101 - test assertion
+    assert record["failure_reason"] == "registry rejected"  # nosec B101 - test assertion
+
+
+def test_api_error_with_state_write_failure_is_surfaced(write_env, monkeypatch):
+    real_update = cfr.StateStore.update
+
+    def flaky_update(self, domain, **fields):
+        if fields.get("state") in (cfr.STATE_FAILED, cfr.STATE_UNKNOWN):
+            raise PermissionError(13, "Permission denied")
+        return real_update(self, domain, **fields)
+
+    monkeypatch.setattr(cfr.StateStore, "update", flaky_update)
+    routes = registration_routes()
+    routes[("POST", "/registrations")] = (400, envelope(None, success=False, errors=[{"code": 1, "message": "rejected"}]))
+    code, _, err = run(["register", DOMAIN, "--confirm", PHRASE_1Y], write_env, FakeTransport(routes), human_types(DOMAIN))
+    assert code == 1  # nosec B101 - test assertion
+    assert "local state could not be recorded" in err  # nosec B101 - test assertion
+    assert "registration-status" in err  # nosec B101 - test assertion
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion

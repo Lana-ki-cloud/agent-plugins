@@ -97,6 +97,9 @@ STATE_SUCCEEDED = "succeeded"
 # How long a state update waits for a concurrent holder of the per-domain lock.
 LOCK_WAIT_SECONDS = 5.0
 
+# Remote workflow states documented for registration-status / update-status.
+REMOTE_WORKFLOW_STATES = frozenset({"pending", "in_progress", "action_required", "blocked", "succeeded", "failed"})
+
 IRREVERSIBLE_WARNING = (
     "WARNING: Domain registration is an irreversible purchase. Cloudflare "
     "Registrar does not refund domain registrations. The account's default "
@@ -692,9 +695,12 @@ def op_register(
         state = STATE_FAILED if exc.definitive else STATE_UNKNOWN
         try:
             store.update(name, state=state, failure_reason=exc.reason, http_status=exc.http_status)
-        except (OSError, IdempotencyError):
+        except (OSError, IdempotencyError) as state_exc:
             # The local record stays "submitted", which still blocks resubmission.
-            pass
+            raise RegistrarError(
+                f"{exc.reason}; additionally the local state could not be recorded "
+                f"({state_exc.__class__.__name__}). Do not resubmit, run 'registration-status'"
+            ) from None
         raise
     try:
         store.update(name, **_state_from_workflow(workflow))
@@ -712,7 +718,15 @@ def op_status(client: RegistrarClient, store: StateStore, domain: str) -> dict:
     name = normalize_domain(domain)
     workflow = op_registration_status(client, name)
     record = store.get(name)
-    if record is not None:
+    remote_state = workflow.get("state") if isinstance(workflow, dict) else None
+    # Only sync a recognized remote state, and never move a terminal local
+    # "succeeded" record (or overwrite a recorded failure) to anything else.
+    if (
+        record is not None
+        and remote_state in REMOTE_WORKFLOW_STATES
+        and record.get("state") != STATE_SUCCEEDED
+        and not (record.get("state") == STATE_FAILED and remote_state != "succeeded")
+    ):
         record = store.update(name, **_state_from_workflow(workflow))
     return {"domain": name, "workflow": workflow, "local_state": record}
 
@@ -850,6 +864,12 @@ def main(
     stdout=None,
     stderr=None,
 ) -> int:
+    """CLI entry point.
+
+    ``env``, ``transport`` and ``confirm_fn`` are test hooks only. The console
+    entry point never sets them; injecting ``confirm_fn`` replaces the
+    interactive-terminal confirmation and must not be used outside tests.
+    """
     env = os.environ if env is None else env
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr

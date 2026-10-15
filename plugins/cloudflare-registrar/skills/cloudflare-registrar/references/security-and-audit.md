@@ -42,7 +42,7 @@ Every invocation appends JSON lines to the audit log (file mode `0600`, director
 | `domain`         | Normalized domain when the operation targets one, otherwise `null` |
 | `http_status`    | HTTP status of a failed API call, otherwise `null`                 |
 
-Write operations are **audit-first**: a `started` entry is written before any gate that talks to Cloudflare. If it cannot be written, the command aborts without contacting Cloudflare. A successful registration produces `register/started`, `register.submit/started` and `register/success`.
+Write operations are **audit-first**: a `started` entry is written before any gate that talks to Cloudflare. If it cannot be written, the command aborts without contacting Cloudflare. Any operation whose audit entry cannot be written exits with code `1` and says so on stderr (`audit_log: not writable`). A successful registration produces `register/started`, `register.submit/started` and `register/success`.
 
 Example (illustrative):
 
@@ -56,7 +56,7 @@ Ship the audit log to the Lana KI control plane's central log store with an appe
 
 - The normalized domain name (lowercase, punycode, no trailing dot) is the unique registration key, matching Cloudflare's own one-registration-per-domain rule.
 - Before submission, the CLI atomically creates `<state dir>/<domain>.json` with state `submitted` (write-ahead), under an exclusive `<domain>.lock` file. A second or concurrent submission for the same domain is blocked while any record or lock exists.
-- Every local state write (including the `registration-status` sync and the remote readback) takes the same lock. A remote readback only records a registration when no local record exists, so it never overwrites a submission or a failure reason.
+- Every local state write (including the `registration-status` sync and the remote readback) takes the same lock. A remote readback only records a registration when no local record exists, so it never overwrites a submission or a failure reason. `registration-status` never downgrades a `succeeded` record, ignores unrecognized remote states, and still returns the remote status when the lock is busy (`local_sync: skipped`).
 - A stale lock (no process running) is never removed automatically. Check `registration-status` before deleting it manually.
 - On `--retry-after-failure`, the failed record is moved to `<state dir>/archive/` (never deleted), and the new record references it under `previous_failure`.
 - It also reads back `GET /registrations/<domain>`. If the domain is already registered in the account, it is blocked and recorded as `succeeded`.

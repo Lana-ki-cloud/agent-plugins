@@ -44,7 +44,7 @@ Transfer-in and transfer auth/EPP codes are intentionally out of scope.
 2. The write token is present.
 3. The audit log is writable.
 4. No local or remote registration exists for the domain.
-5. A fresh real-time check still shows the domain as registrable and standard tier.
+5. A fresh real-time check still shows the domain as registrable and explicitly `standard` tier (premium, missing or unknown tiers are refused).
 6. `--confirm` matches the fresh quote exactly.
 7. A human at an **interactive terminal** retypes the domain name after seeing the summary.
 

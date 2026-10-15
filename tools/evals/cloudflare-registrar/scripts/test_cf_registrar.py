@@ -472,8 +472,9 @@ def test_write_fails_closed_if_audit_log_unwritable(write_env, tmp_path):
     blocker.write_text("")
     env = {**write_env, cfr.ENV_AUDIT_LOG: str(blocker / "audit.jsonl")}
     transport = FakeTransport(registration_routes())
-    with pytest.raises(OSError):
-        run(["register", DOMAIN, "--confirm", PHRASE_1Y], env, transport, human_types(DOMAIN))
+    code, _, err = run(["register", DOMAIN, "--confirm", PHRASE_1Y], env, transport, human_types(DOMAIN))
+    assert code == 1  # nosec B101 - test assertion
+    assert json.loads(err)["audit_log"].startswith("not writable")  # nosec B101 - test assertion
     assert transport.calls == []  # nosec B101 - test assertion
 
 
@@ -618,19 +619,6 @@ def test_state_updates_respect_the_domain_lock(write_env, monkeypatch):
     assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
 
 
-def test_registration_status_does_not_write_while_lock_is_held(write_env, monkeypatch):
-    monkeypatch.setattr(cfr, "LOCK_WAIT_SECONDS", 0.0)
-    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
-    store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED})
-    (store.directory / f"{DOMAIN}.lock").write_text("")
-    done = {**WORKFLOW_PENDING, "completed": True, "state": "succeeded"}
-    transport = FakeTransport({("GET", f"/registrations/{DOMAIN}/registration-status"): (200, envelope(done))})
-    code, _, err = run(["registration-status", DOMAIN], write_env, transport)
-    assert code == 2  # nosec B101 - test assertion
-    assert "lock" in err  # nosec B101 - test assertion
-    assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
-
-
 def test_retry_fails_cleanly_if_failed_record_vanishes(write_env, monkeypatch):
     store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
     store.update(DOMAIN, state=cfr.STATE_FAILED, failure_reason="registry rejected")
@@ -680,4 +668,28 @@ def test_api_error_with_state_write_failure_is_surfaced(write_env, monkeypatch):
     assert "local state could not be recorded" in err  # nosec B101 - test assertion
     assert "registration-status" in err  # nosec B101 - test assertion
     store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
+
+
+@pytest.mark.parametrize("tier", [None, "", "platinum"])
+def test_quote_fails_closed_on_missing_or_unknown_tier(env, tier):
+    entry = {**CHECK_OK["domains"][0], "tier": tier}
+    transport = FakeTransport({("POST", "/domain-check"): (200, envelope({"domains": [entry]}))})
+    code, _, err = run(["quote", DOMAIN], env, transport)
+    assert code == 2  # nosec B101 - test assertion
+    assert "standard-tier" in err  # nosec B101 - test assertion
+
+
+def test_registration_status_returns_remote_status_when_lock_is_held(write_env, monkeypatch):
+    monkeypatch.setattr(cfr, "LOCK_WAIT_SECONDS", 0.0)
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED})
+    (store.directory / f"{DOMAIN}.lock").write_text("")
+    done = {**WORKFLOW_PENDING, "completed": True, "state": "succeeded"}
+    transport = FakeTransport({("GET", f"/registrations/{DOMAIN}/registration-status"): (200, envelope(done))})
+    code, out, _ = run(["registration-status", DOMAIN], write_env, transport)
+    assert code == 0  # nosec B101 - test assertion
+    result = json.loads(out)
+    assert result["workflow"]["state"] == "succeeded"  # nosec B101 - test assertion
+    assert result["local_sync"].startswith("skipped")  # nosec B101 - test assertion
     assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion

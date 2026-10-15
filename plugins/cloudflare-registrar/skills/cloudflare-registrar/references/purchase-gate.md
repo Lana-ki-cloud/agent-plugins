@@ -12,7 +12,7 @@ A `register` request reaches Cloudflare only when **all** of the following are t
 | 2   | Separate write token | `CF_REGISTRAR_WRITE_TOKEN` is present. The read token is never used for writes.                                 |
 | 3   | Audit log writable   | A `started` audit entry is written before anything else. If that fails, the command aborts.                     |
 | 4   | Idempotency          | No local record for the domain, and no existing registration in the Cloudflare account.                         |
-| 5   | Fresh quote          | `domain-check` is called again. The domain must be `registrable: true` and standard tier (premium is refused).  |
+| 5   | Fresh quote          | `domain-check` runs again. Must be `registrable: true` and tier `standard` (premium/missing/unknown refused).   |
 | 6   | Confirmation phrase  | `--confirm` must equal the current quote's `confirmation_phrase`. Any price, currency or term change breaks it. |
 | 7   | Human at a terminal  | The CLI shows the purchase summary on an interactive TTY and the human must retype the domain name.             |
 

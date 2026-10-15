@@ -421,8 +421,10 @@ def op_quote(client: RegistrarClient, domain: str, years: int = 1) -> dict:
         raise ApiError(f"no availability result returned for {name}")
     if not match.get("registrable"):
         raise GateError(f"{name} is not registrable via API: {match.get('reason') or 'unknown reason'}")
-    if match.get("tier") == "premium":
-        raise GateError(f"{name} is a premium domain; premium registration must be done manually")
+    tier = match.get("tier")
+    if tier != "standard":
+        # Fail closed: premium, missing or unknown tiers are never purchasable here.
+        raise GateError(f"{name} is not a standard-tier domain (tier: {tier or 'missing'}); register it manually")
     pricing = match.get("pricing") or {}
     currency = str(pricing.get("currency") or "")
     first_year = pricing.get("registration_cost")
@@ -437,7 +439,7 @@ def op_quote(client: RegistrarClient, domain: str, years: int = 1) -> dict:
         "first_year_price": str(first_year),
         "renewal_price": str(renewal),
         "estimated_total_for_term": str(total),
-        "tier": match.get("tier") or "standard",
+        "tier": tier,
         "auto_renew": False,
         "warning": IRREVERSIBLE_WARNING,
     }
@@ -727,7 +729,16 @@ def op_status(client: RegistrarClient, store: StateStore, domain: str) -> dict:
         and record.get("state") != STATE_SUCCEEDED
         and not (record.get("state") == STATE_FAILED and remote_state != "succeeded")
     ):
-        record = store.update(name, **_state_from_workflow(workflow))
+        try:
+            record = store.update(name, **_state_from_workflow(workflow))
+        except (IdempotencyError, OSError) as exc:
+            # The remote status is still returned; the local record is left as-is.
+            return {
+                "domain": name,
+                "workflow": workflow,
+                "local_state": record,
+                "local_sync": f"skipped ({exc.__class__.__name__}); run registration-status again later",
+            }
     return {"domain": name, "workflow": workflow, "local_state": record}
 
 
@@ -900,19 +911,44 @@ def main(
         result = _dispatch(args, client, store, audit, confirm_fn or tty_confirm)
     except RegistrarError as exc:
         reason = redact(exc.reason, secrets)
-        audit.record(operation, exc.status, mode=mode, failure_reason=reason, domain=domain, http_status=exc.http_status)
-        stderr.write(json.dumps({"operation": operation, "status": exc.status, "failure_reason": reason}) + "\n")
+        _report(audit, stderr, operation, exc.status, mode, domain, reason, exc.http_status)
         return 2 if exc.status == STATUS_BLOCKED else 1
     except OSError as exc:
         # Local state/filesystem failure. Paths and errno are safe to log; no secrets involved.
         reason = redact(f"local I/O error: {exc.__class__.__name__}: {exc.strerror or exc}", secrets)
-        audit.record(operation, STATUS_FAILURE, mode=mode, failure_reason=reason, domain=domain)
-        stderr.write(json.dumps({"operation": operation, "status": STATUS_FAILURE, "failure_reason": reason}) + "\n")
+        _report(audit, stderr, operation, STATUS_FAILURE, mode, domain, reason)
         return 1
 
-    audit.record(operation, STATUS_SUCCESS, mode=mode, domain=domain)
     stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    try:
+        audit.record(operation, STATUS_SUCCESS, mode=mode, domain=domain)
+    except OSError as exc:
+        stderr.write(json.dumps({
+            "operation": operation,
+            "status": STATUS_FAILURE,
+            "failure_reason": f"operation completed but the audit log is not writable ({exc.__class__.__name__})",
+        }) + "\n")
+        return 1
     return 0
+
+
+def _report(
+    audit: AuditLog,
+    stderr,
+    operation: str,
+    status: str,
+    mode: str,
+    domain: Optional[str],
+    reason: str,
+    http_status: Optional[int] = None,
+) -> None:
+    """Audit and print a failure. An unwritable audit log is reported, never raised."""
+    payload = {"operation": operation, "status": status, "failure_reason": reason}
+    try:
+        audit.record(operation, status, mode=mode, failure_reason=reason, domain=domain, http_status=http_status)
+    except OSError as exc:
+        payload["audit_log"] = f"not writable ({exc.__class__.__name__})"
+    stderr.write(json.dumps(payload) + "\n")
 
 
 if __name__ == "__main__":

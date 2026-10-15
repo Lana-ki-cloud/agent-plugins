@@ -59,7 +59,8 @@ ENV_WRITE_ENABLED = "CF_REGISTRAR_WRITE_ENABLED"
 ENV_STATE_DIR = "CF_REGISTRAR_STATE_DIR"
 ENV_AUDIT_LOG = "CF_REGISTRAR_AUDIT_LOG"
 
-DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "cf-registrar"
+# Default state directory, relative to the home directory (resolved lazily).
+DEFAULT_STATE_SUBDIR = Path(".local") / "state" / "cf-registrar"
 
 MODE_READ = "read"
 MODE_WRITE = "write"
@@ -627,7 +628,9 @@ def _state_from_workflow(workflow: Any) -> dict:
     if not isinstance(workflow, dict):
         return {"state": STATE_UNKNOWN}
     remote_state = workflow.get("state")
-    fields = {"state": remote_state or STATE_UNKNOWN, "remote_state": remote_state}
+    if remote_state not in REMOTE_WORKFLOW_STATES:
+        return {"state": STATE_UNKNOWN, "remote_state": remote_state}
+    fields = {"state": remote_state, "remote_state": remote_state}
     if remote_state == "failed":
         fields["state"] = STATE_FAILED
         error = workflow.get("error") or {}
@@ -651,7 +654,10 @@ def op_register(
     name = normalize_domain(domain)
     check_local_idempotency(store, name, retry_after_failure)
     if remote_registration_exists(client, name):
-        store.update(name, only_if_absent=True, state=STATE_SUCCEEDED, source="remote-readback")
+        try:
+            store.update(name, only_if_absent=True, state=STATE_SUCCEEDED, source="remote-readback")
+        except (IdempotencyError, OSError):
+            pass  # Recording the readback is best-effort; the submission is blocked either way.
         raise IdempotencyError(f"{name}: a registration already exists in the Cloudflare account")
 
     quote = op_quote(client, name, years)
@@ -888,7 +894,7 @@ def main(
     operation = args.operation
     mode = MODE_WRITE if operation in WRITE_OPERATIONS else MODE_READ
 
-    state_dir = Path(env.get(ENV_STATE_DIR) or DEFAULT_STATE_DIR)
+    state_dir = Path(env[ENV_STATE_DIR]) if env.get(ENV_STATE_DIR) else Path.home() / DEFAULT_STATE_SUBDIR
     secrets = (env.get(ENV_READ_TOKEN, ""), env.get(ENV_WRITE_TOKEN, ""))
     audit = AuditLog(Path(env.get(ENV_AUDIT_LOG) or state_dir / "audit.jsonl"), secrets)
     store = StateStore(state_dir)

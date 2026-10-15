@@ -693,3 +693,24 @@ def test_registration_status_returns_remote_status_when_lock_is_held(write_env, 
     assert result["workflow"]["state"] == "succeeded"  # nosec B101 - test assertion
     assert result["local_sync"].startswith("skipped")  # nosec B101 - test assertion
     assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
+
+
+def test_unrecognized_remote_workflow_state_is_stored_as_unknown(write_env):
+    weird = {**WORKFLOW_PENDING, "state": "mystery"}
+    run(["register", DOMAIN, "--confirm", PHRASE_1Y], write_env,
+        FakeTransport(registration_routes(post=(202, envelope(weird)))), human_types(DOMAIN))
+    record = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR])).get(DOMAIN)
+    assert record["state"] == cfr.STATE_UNKNOWN  # nosec B101 - test assertion
+    assert record["remote_state"] == "mystery"  # nosec B101 - test assertion
+
+
+def test_remote_registration_message_survives_busy_lock(write_env, monkeypatch):
+    monkeypatch.setattr(cfr, "LOCK_WAIT_SECONDS", 0.0)
+    state_dir = Path(write_env[cfr.ENV_STATE_DIR])
+    state_dir.mkdir(parents=True)
+    (state_dir / f"{DOMAIN}.lock").write_text("")
+    routes = registration_routes()
+    routes[("GET", f"/registrations/{DOMAIN}")] = (200, envelope({"domain_name": DOMAIN}))
+    code, _, err = run(["register", DOMAIN, "--confirm", PHRASE_1Y], write_env, FakeTransport(routes), human_types(DOMAIN))
+    assert code == 2  # nosec B101 - test assertion
+    assert "already exists in the Cloudflare account" in err  # nosec B101 - test assertion

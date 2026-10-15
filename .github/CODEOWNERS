@@ -34,6 +34,7 @@ plugins/amazon-location-service     @awslabs/agent-plugins-admins @awslabs/agent
 plugins/aws-amplify                 @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers  @awslabs/agent-plugins-amplify
 plugins/aws-serverless              @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers  @awslabs/agent-plugins-aws-serverless
 plugins/aws-transform               @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers  @awslabs/agent-plugins-aws-transform
+plugins/cloudflare-registrar        @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers
 plugins/codebase-documentor-for-aws @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers  @awslabs/agent-plugins-codebase-documentor-for-aws
 plugins/databases-on-aws            @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers  @awslabs/agent-plugins-dsql
 plugins/deploy-on-aws               @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers  @awslabs/agent-plugins-deploy-on-aws
@@ -42,6 +43,7 @@ plugins/sagemaker-ai                @awslabs/agent-plugins-admins @awslabs/agent
 
 ## Evals (match plugin ownership)
 
+tools/evals/cloudflare-registrar    @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers
 tools/evals/databases-on-aws        @awslabs/agent-plugins-admins @awslabs/agent-plugins-maintainers  @awslabs/agent-plugins-dsql
 
 ## File must end with CODEOWNERS file

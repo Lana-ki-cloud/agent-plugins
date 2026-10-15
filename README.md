@@ -43,6 +43,7 @@ To maximize the benefits of plugin-assisted development while maintaining securi
 | **aws-amplify**                 | Build full-stack apps with AWS Amplify Gen 2 using guided workflows for auth, data, storage, and functions                                                                                              | Available                             |
 | **aws-serverless**              | Build serverless applications with Lambda, API Gateway, EventBridge, Step Functions, durable functions, and Lambda Managed Instances                                                                    | Available                             |
 | **aws-transform**               | Migrate, modernize, and upgrade codebases to AWS — .NET to .NET 8/10, mainframe COBOL to Java, VMware to EC2, SQL Server to Aurora, and language/SDK upgrades                                           | Available                             |
+| **cloudflare-registrar**        | Secret-safe, audit-first Cloudflare Registrar access for Lana KI — read-only by default, with explicitly gated (non-refundable) domain registration                                                     | Available                             |
 | **codebase-documentor-for-aws** | Analyze AWS-deployed services and codebases to generate structured technical documentation with source-of-truth citations                                                                               | Available                             |
 | **databases-on-aws**            | Database guidance for the AWS database portfolio — schema design, queries, migrations, and multi-tenant patterns                                                                                        | Some Services Available (Aurora DSQL) |
 | **deploy-on-aws**               | Deploy applications to AWS with architecture recommendations, cost estimates, and IaC deployment                                                                                                        | Available                             |
@@ -75,6 +76,12 @@ or
 
 ```bash
 /plugin install aws-serverless@agent-plugins-for-aws
+```
+
+or
+
+```bash
+/plugin install cloudflare-registrar@agent-plugins-for-aws
 ```
 
 or

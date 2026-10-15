@@ -63,6 +63,16 @@ INTERFACE_METADATA = {
             "Plan a VMware-to-EC2 migration for my workload.",
         ],
     },
+    "cloudflare-registrar": {
+        "displayName": "Cloudflare Registrar",
+        "shortDescription": "Search, check, and audit Cloudflare Registrar domains with a read-only default.",
+        "longDescription": "Secret-safe, audit-first Cloudflare Registrar access for Lana KI. Read-only by default; registration and configuration changes are separately gated behind explicit human confirmation.",
+        "defaultPrompt": [
+            "Check if this domain is available and what it costs.",
+            "List the domains in my Cloudflare Registrar account.",
+            "Check whether this domain can be transferred to Cloudflare.",
+        ],
+    },
     "databases-on-aws": {
         "displayName": "Databases on AWS",
         "shortDescription": "Design schemas, query data, and choose the right AWS database path.",

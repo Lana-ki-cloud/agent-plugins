@@ -1,0 +1,23 @@
+{
+  "author": {
+    "name": "Lana KI"
+  },
+  "description": "Secret-safe, audit-first Cloudflare Registrar access for Lana KI. Read-only by default: domain search, availability and pricing, transferability, registrar reads, and workflow status. Registration and registrar configuration changes are separately gated and require explicit human confirmation.",
+  "homepage": "https://github.com/Lana-ki-cloud/agent-plugins",
+  "keywords": [
+    "cloudflare",
+    "registrar",
+    "domains",
+    "domain-search",
+    "domain-availability",
+    "domain-pricing",
+    "transfer",
+    "audit",
+    "least-privilege",
+    "lana-ki"
+  ],
+  "license": "Apache-2.0",
+  "name": "cloudflare-registrar",
+  "repository": "https://github.com/Lana-ki-cloud/agent-plugins",
+  "version": "0.1.0"
+}

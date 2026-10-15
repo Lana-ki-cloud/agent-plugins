@@ -55,13 +55,16 @@ Ship the audit log to the Lana KI control plane's central log store with an appe
 ## Idempotency
 
 - The normalized domain name (lowercase, punycode, no trailing dot) is the unique registration key, matching Cloudflare's own one-registration-per-domain rule.
-- Before submission, the CLI atomically creates `<state dir>/<domain>.json` with state `submitted` (write-ahead). A second submission for the same domain is blocked while any record exists.
+- Before submission, the CLI atomically creates `<state dir>/<domain>.json` with state `submitted` (write-ahead), under an exclusive `<domain>.lock` file. A second or concurrent submission for the same domain is blocked while any record or lock exists.
+- A stale lock (no process running) is never removed automatically. Check `registration-status` before deleting it manually.
+- On `--retry-after-failure`, the failed record is moved to `<state dir>/archive/` (never deleted), and the new record references it under `previous_failure`.
 - It also reads back `GET /registrations/<domain>`. If the domain is already registered in the account, it is blocked and recorded as `succeeded`.
 - Outcomes:
   - HTTP 4xx → `failed` with the reason. Requires a human decision (`--retry-after-failure`).
   - Network error or HTTP 5xx → `unknown`. Never retried. Run `registration-status`.
   - Accepted → the workflow `state` (`pending`, `in_progress`, ...). `registration-status` keeps it in sync.
 - A corrupt state file is treated as `unknown`, never as "no record".
+- If the state file cannot be updated after a successful submission, the command reports a failure, keeps the `submitted` record (domain stays locked), and asks for `registration-status`.
 
 ## Endpoints used
 

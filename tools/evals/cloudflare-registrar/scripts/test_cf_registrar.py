@@ -513,3 +513,79 @@ def test_client_repr_hides_token():
 def test_tokens_cannot_be_passed_on_the_command_line():
     with pytest.raises(SystemExit):
         cfr.build_parser().parse_args(["list-domains", "--token", "x"])
+
+
+# ---------------------------------------------------------------- review hardening
+
+
+def test_search_rejects_non_positive_limit(env):
+    transport = FakeTransport()
+    code, _, _ = run(["search", "lana", "--limit", "0"], env, transport)
+    assert code == 1 and transport.calls == []  # nosec B101 - test assertion
+
+
+def test_concurrent_submission_is_blocked_by_lock(write_env):
+    state_dir = Path(write_env[cfr.ENV_STATE_DIR])
+    state_dir.mkdir(parents=True)
+    (state_dir / f"{DOMAIN}.lock").write_text("")
+    transport = FakeTransport(registration_routes())
+    code, _, err = run(["register", DOMAIN, "--confirm", PHRASE_1Y], write_env, transport, human_types(DOMAIN))
+    assert code == 2  # nosec B101 - test assertion
+    assert "lock" in err  # nosec B101 - test assertion
+    assert posted_registrations(transport) == []  # nosec B101 - test assertion
+
+
+def test_concurrent_retry_after_failure_cannot_both_claim(write_env):
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.update(DOMAIN, state=cfr.STATE_FAILED, failure_reason="registry rejected")
+    store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED}, replace_failed=True)
+    with pytest.raises(cfr.IdempotencyError):
+        store.claim(DOMAIN, {"domain": DOMAIN, "state": cfr.STATE_SUBMITTED}, replace_failed=True)
+    assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
+
+
+def test_retry_after_failure_archives_previous_record(write_env):
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    store.update(DOMAIN, state=cfr.STATE_FAILED, failure_reason="registry rejected", submitted_at="t0")
+    code, _, _ = run(
+        ["register", DOMAIN, "--confirm", PHRASE_1Y, "--retry-after-failure"],
+        write_env, FakeTransport(registration_routes()), human_types(DOMAIN),
+    )
+    assert code == 0  # nosec B101 - test assertion
+    record = store.get(DOMAIN)
+    assert record["previous_failure"]["failure_reason"] == "registry rejected"  # nosec B101 - test assertion
+    archived = list((store.directory / "archive").glob(f"{DOMAIN}.*.json"))
+    assert len(archived) == 1  # nosec B101 - test assertion
+    assert json.loads(archived[0].read_text())["submitted_at"] == "t0"  # nosec B101 - test assertion
+    assert not (store.directory / f"{DOMAIN}.lock").exists()  # nosec B101 - test assertion
+
+
+def test_state_write_failure_after_submit_is_audited_and_keeps_lock(write_env, monkeypatch):
+    real_update = cfr.StateStore.update
+
+    def flaky_update(self, domain, **fields):
+        if fields.get("state") == "pending":
+            raise PermissionError(13, "Permission denied")
+        return real_update(self, domain, **fields)
+
+    monkeypatch.setattr(cfr.StateStore, "update", flaky_update)
+    transport = FakeTransport(registration_routes())
+    code, _, err = run(["register", DOMAIN, "--confirm", PHRASE_1Y], write_env, transport, human_types(DOMAIN))
+    assert code == 1  # nosec B101 - test assertion
+    assert "registration-status" in err  # nosec B101 - test assertion
+    assert audit_entries(write_env)[-1]["status"] == "failure"  # nosec B101 - test assertion
+    store = cfr.StateStore(Path(write_env[cfr.ENV_STATE_DIR]))
+    assert store.get(DOMAIN)["state"] == cfr.STATE_SUBMITTED  # nosec B101 - test assertion
+
+
+def test_local_io_errors_are_audited_not_crashed(write_env, monkeypatch):
+    def broken_claim(self, domain, record, replace_failed=False):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cfr.StateStore, "claim", broken_claim)
+    transport = FakeTransport(registration_routes())
+    code, _, err = run(["register", DOMAIN, "--confirm", PHRASE_1Y], write_env, transport, human_types(DOMAIN))
+    assert code == 1  # nosec B101 - test assertion
+    assert "local I/O error" in err  # nosec B101 - test assertion
+    assert posted_registrations(transport) == []  # nosec B101 - test assertion
+    assert audit_entries(write_env)[-1]["status"] == "failure"  # nosec B101 - test assertion

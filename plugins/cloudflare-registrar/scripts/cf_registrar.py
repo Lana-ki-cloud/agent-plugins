@@ -325,6 +325,8 @@ class RegistrarClient:
 def op_search(client: RegistrarClient, query: str, extensions: Iterable[str] = (), limit: Optional[int] = None) -> Any:
     if not query or not query.strip():
         raise ConfigError("search query must not be empty")
+    if limit is not None and limit < 1:
+        raise ConfigError("limit must be at least 1")
     return client.request(
         "GET",
         "domain-search",
@@ -467,19 +469,45 @@ class StateStore:
             json.dump(record, handle, sort_keys=True)
 
     def claim(self, domain: str, record: Mapping[str, Any], replace_failed: bool = False) -> None:
-        """Atomically create the record; fail if one already exists."""
+        """Atomically create the record; fail if one already exists.
+
+        The whole check-and-create runs under an O_EXCL lock file, so concurrent
+        submissions (including concurrent ``--retry-after-failure``) cannot both
+        proceed. A failed record is archived (never deleted) before replacement.
+        """
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = self._path(domain)
-        if replace_failed:
-            existing = self.get(domain)
-            if existing is not None:
-                if existing.get("state") != STATE_FAILED:
-                    raise IdempotencyError(f"{domain}: --retry-after-failure only applies to a failed record")
-                path.unlink()
+        name = normalize_domain(domain)
+        path = self._path(name)
+        lock = self.directory / f"{name}.lock"
         try:
-            self._write(path, record, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         except FileExistsError:
-            raise IdempotencyError(f"{domain}: a registration record already exists") from None
+            raise IdempotencyError(
+                f"{name}: another submission holds the lock ({lock.name}); if no process is running, "
+                "verify registration-status before removing the stale lock manually"
+            ) from None
+        try:
+            record = dict(record)
+            if replace_failed:
+                existing = self.get(name)
+                if existing is not None:
+                    if existing.get("state") != STATE_FAILED:
+                        raise IdempotencyError(f"{name}: --retry-after-failure only applies to a failed record")
+                    archive_dir = self.directory / "archive"
+                    archive_dir.mkdir(mode=0o700, exist_ok=True)
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                    archived = archive_dir / f"{name}.{stamp}.json"
+                    os.rename(path, archived)
+                    record["previous_failure"] = {
+                        "archived_record": f"archive/{archived.name}",
+                        "failure_reason": existing.get("failure_reason"),
+                    }
+            try:
+                self._write(path, record, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            except FileExistsError:
+                raise IdempotencyError(f"{name}: a registration record already exists") from None
+        finally:
+            lock.unlink()
 
     def update(self, domain: str, **fields: Any) -> dict:
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -633,7 +661,14 @@ def op_register(
         state = STATE_FAILED if exc.definitive else STATE_UNKNOWN
         store.update(name, state=state, failure_reason=exc.reason, http_status=exc.http_status)
         raise
-    store.update(name, **_state_from_workflow(workflow))
+    try:
+        store.update(name, **_state_from_workflow(workflow))
+    except OSError as exc:
+        # The local record stays "submitted", which keeps the domain locked.
+        raise RegistrarError(
+            f"registration was submitted but the local state could not be updated ({exc.__class__.__name__}); "
+            "do not resubmit, run 'registration-status'"
+        ) from None
     return {"domain": name, "workflow": workflow}
 
 
@@ -813,6 +848,12 @@ def main(
         audit.record(operation, exc.status, mode=mode, failure_reason=reason, domain=domain, http_status=exc.http_status)
         stderr.write(json.dumps({"operation": operation, "status": exc.status, "failure_reason": reason}) + "\n")
         return 2 if exc.status == STATUS_BLOCKED else 1
+    except OSError as exc:
+        # Local state/filesystem failure. Paths and errno are safe to log; no secrets involved.
+        reason = redact(f"local I/O error: {exc.__class__.__name__}: {exc.strerror or exc}", secrets)
+        audit.record(operation, STATUS_FAILURE, mode=mode, failure_reason=reason, domain=domain)
+        stderr.write(json.dumps({"operation": operation, "status": STATUS_FAILURE, "failure_reason": reason}) + "\n")
+        return 1
 
     audit.record(operation, STATUS_SUCCESS, mode=mode, domain=domain)
     stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")

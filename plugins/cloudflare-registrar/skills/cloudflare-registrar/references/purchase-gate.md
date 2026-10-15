@@ -20,7 +20,7 @@ Gate 7 is checked twice: TTY presence right after gates 1–2, before any reques
 
 `update-domain` uses gates 1, 2, 3 and 7. Its gate 7 shows the requested changes, but the human only retypes the domain name, so the human must read the change summary before confirming. It has no idempotency or quote checks.
 
-The gates assume the CLI is run as a command. `main()` accepts a `confirm_fn` hook for tests only; backend code must not inject one.
+The gates assume the CLI is run as a command. `main()` accepts a private, keyword-only `_confirm_fn` hook for tests only; backend code must not inject one.
 
 ## Purchase summary (what the user must see)
 

@@ -397,9 +397,12 @@ def op_get_extension(client: RegistrarClient, extension: str) -> Any:
 
 def _decimal(value: Any, field: str) -> Decimal:
     try:
-        return Decimal(str(value))
+        amount = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise ApiError(f"unexpected {field} value in pricing response") from exc
+    if not amount.is_finite() or amount < 0:
+        raise ApiError(f"unexpected {field} value in pricing response")
+    return amount
 
 
 def confirmation_phrase(quote: Mapping[str, Any]) -> str:
@@ -750,6 +753,7 @@ def op_status(client: RegistrarClient, store: StateStore, domain: str) -> dict:
 
 def op_update_domain(
     client: RegistrarClient,
+    audit: AuditLog,
     confirm_fn: ConfirmFn,
     domain: str,
     auto_renew: Optional[bool],
@@ -767,6 +771,7 @@ def op_update_domain(
     if changes.get("locked") is False:
         lines.append("NOTE: unlocking a domain allows it to be transferred away.")
     human_confirm(confirm_fn, name, lines)
+    audit.record("update-domain.submit", STATUS_STARTED, mode=MODE_WRITE, domain=name)
     return client.request("PUT", f"domains/{name}", body=changes)
 
 
@@ -869,24 +874,26 @@ def _dispatch(args: argparse.Namespace, client: RegistrarClient, store: StateSto
     if op == "register":
         return op_register(client, store, audit, confirm, args.domain, args.years, args.confirm, args.retry_after_failure)
     if op == "update-domain":
-        return op_update_domain(client, confirm, args.domain, args.auto_renew, args.locked, args.privacy)
+        return op_update_domain(client, audit, confirm, args.domain, args.auto_renew, args.locked, args.privacy)
     raise ConfigError(f"unknown operation {op}")  # pragma: no cover - argparse restricts choices
 
 
 def main(
     argv: Optional[list] = None,
+    *,
     env: Optional[Mapping[str, str]] = None,
     transport: Optional[Transport] = None,
-    confirm_fn: Optional[ConfirmFn] = None,
+    _confirm_fn: Optional[ConfirmFn] = None,
     stdout=None,
     stderr=None,
 ) -> int:
     """CLI entry point.
 
-    ``env``, ``transport`` and ``confirm_fn`` are test hooks only. The console
-    entry point never sets them; injecting ``confirm_fn`` replaces the
-    interactive-terminal confirmation and must not be used outside tests.
+    The keyword arguments are private test hooks. The console entry point never
+    sets them; ``_confirm_fn`` replaces the interactive-terminal confirmation
+    and must never be used outside tests.
     """
+    confirm_fn = _confirm_fn
     env = os.environ if env is None else env
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr

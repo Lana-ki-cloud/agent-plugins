@@ -95,7 +95,7 @@ def write_env(env):
 
 def run(argv, env, transport, confirm_fn=None):
     out, err = StringIO(), StringIO()
-    code = cfr.main(argv, env=env, transport=transport, confirm_fn=confirm_fn, stdout=out, stderr=err)
+    code = cfr.main(argv, env=env, transport=transport, _confirm_fn=confirm_fn, stdout=out, stderr=err)
     return code, out.getvalue(), err.getvalue()
 
 
@@ -714,3 +714,22 @@ def test_remote_registration_message_survives_busy_lock(write_env, monkeypatch):
     code, _, err = run(["register", DOMAIN, "--confirm", PHRASE_1Y], write_env, FakeTransport(routes), human_types(DOMAIN))
     assert code == 2  # nosec B101 - test assertion
     assert "already exists in the Cloudflare account" in err  # nosec B101 - test assertion
+
+
+@pytest.mark.parametrize("cost", ["NaN", "Infinity", "-1.00", "abc"])
+def test_quote_rejects_malformed_prices(env, cost):
+    entry = {**CHECK_OK["domains"][0], "pricing": {"currency": "USD", "registration_cost": cost, "renewal_cost": "12.18"}}
+    transport = FakeTransport({("POST", "/domain-check"): (200, envelope({"domains": [entry]}))})
+    code, out, _ = run(["quote", DOMAIN], env, transport)
+    assert code == 1  # nosec B101 - test assertion
+    assert out == ""  # nosec B101 - test assertion
+
+
+def test_update_domain_audits_submit_before_put(write_env):
+    transport = FakeTransport({("PUT", f"/domains/{DOMAIN}"): (200, envelope({"name": DOMAIN}))})
+    code, _, _ = run(["update-domain", DOMAIN, "--auto-renew", "false"], write_env, transport, human_types(DOMAIN))
+    assert code == 0  # nosec B101 - test assertion
+    ops = [(e["operation"], e["status"]) for e in audit_entries(write_env)]
+    assert ops == [  # nosec B101 - test assertion
+        ("update-domain", "started"), ("update-domain.submit", "started"), ("update-domain", "success"),
+    ]

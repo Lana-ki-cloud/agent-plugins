@@ -5,7 +5,7 @@
 - Tokens are read **only** from environment variables on the backend host that runs the CLI. There is no command-line flag for tokens.
 - Never put tokens in client-facing code, browser/mobile apps, prompts, chat, repository files, tests, docs or logs.
 - Load tokens from the backend secret store (for example, a secrets manager) into the CLI's process environment only. Do not write them into shell history or `.env` files that are committed.
-- The CLI redacts known token values, `Authorization` header values and long token-like strings from every printed error, audit entry and state record.
+- The CLI redacts known token values, `Authorization` header values and long token-like strings (40+ characters, the length of Cloudflare API tokens) from every printed error, audit entry and state record. Shorter unknown secrets are not pattern-matched, so never pass other credentials through this CLI.
 - Transfer auth/EPP codes are secrets too. `transfer-check` deliberately does not accept them, and transfer-in is not supported by this plugin. Do transfers in the Cloudflare dashboard.
 
 ## Configuration (backend environment)
